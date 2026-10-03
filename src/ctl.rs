@@ -64,6 +64,10 @@ pub enum Request {
     Theme {
         name: String,
     },
+    /// Ambient background: off, starfield, rain, snow, fireflies, aurora.
+    Background {
+        name: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Default, PartialEq, Eq)]
@@ -244,7 +248,7 @@ fn wait(dispatch: &Dispatch, id: u32, until: WaitFor, timeout_ms: Option<u64>) -
 pub fn client(args: &[String]) -> i32 {
     let usage = "usage: agentty ctl list | open <profile> | open -- <cmd...> [--cwd DIR] | send <id> <text...> [--no-enter] [--paste]\n\
                  \x20                | read <id> [--lines N] | status <id> | wait <id> [--until idle|attention|exit|settled] [--timeout SECS]\n\
-                 \x20                | focus <id> | close <id> | theme <name> | raw '<json>'";
+                 \x20                | focus <id> | close <id> | theme <name> | background <name> | raw '<json>'";
     let req: Value = match build(args) {
         Ok(v) => v,
         Err(e) => {
@@ -341,6 +345,7 @@ fn build(args: &[String]) -> Result<Value, String> {
         }
         "status" | "focus" | "close" => json!({"op": op, "id": id_arg(args)?}),
         "theme" => json!({"op": "theme", "name": args.get(1).ok_or("missing theme name")?}),
+        "background" => json!({"op": "background", "name": args.get(1).ok_or("missing background name")?}),
         other => return Err(format!("unknown command '{other}'")),
     })
 }

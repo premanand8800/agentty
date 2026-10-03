@@ -89,6 +89,8 @@ fn snapshot_renders_a_real_command() {
             title: None,
             tabs: Vec::new(),
             command: vec!["printf".into(), "\\033[31mred\\033[0m ok".into()],
+            background: Some(crate::ambient::Effect::Rain),
+            time: 1.0,
         },
     )
     .unwrap();
@@ -111,4 +113,57 @@ fn wheel_goes_to_scrollback_arrows_or_mouse_reports() {
         Wheel::Bytes(b"\x1b[<64;5;10M".to_vec())
     );
     assert_eq!(wheel(-1, TermMode::MOUSE_REPORT_CLICK, 0, 0), Wheel::Bytes(vec![0x1b, b'[', b'M', 32 + 65, 33, 33]));
+}
+
+#[test]
+fn every_background_stays_inside_its_area_and_off_text() {
+    use crate::ambient::{draw, Area, Effect};
+    let theme = &THEMES[theme::by_name("Pro").unwrap()];
+    let (w, h) = (200usize, 120usize);
+    for effect in Effect::ALL {
+        let mut buf = vec![theme.bg.to_u32(); w * h];
+        // A "text" pixel that must never be painted over.
+        buf[60 * w + 100] = 0x00FF_FFFF;
+        let mut f = Frame { buf: &mut buf, w, h };
+        let area = Area { x: 0.0, y: 20.0, w: w as f32, h: 80.0 };
+        for t in [0.0, 1.3, 7.9] {
+            draw(&mut f, effect, area, t, theme, 1.0, 1.0);
+        }
+        let touched = |y: usize| (0..w).any(|x| buf[y * w + x] != theme.bg.to_u32());
+        assert!((0..20).chain(100..h).all(|y| !touched(y)), "{effect:?} drew outside its area");
+        assert_eq!(buf[60 * w + 100], 0x00FF_FFFF, "{effect:?} painted over text");
+        let painted = (20..100).any(|y| (0..w).any(|x| buf[y * w + x] != theme.bg.to_u32() && (x, y) != (100, 60)));
+        assert_eq!(painted, effect != Effect::Off, "{effect:?}");
+        assert_eq!(Effect::parse(effect.name()), Some(effect));
+    }
+    assert_eq!(Effect::Aurora.next(), Effect::Off);
+}
+
+#[test]
+fn ui_state_round_trips_and_overrides_config() {
+    let ui = crate::config::UiState {
+        theme: Some("Ocean".into()),
+        font: Some("DejaVu Sans Mono".into()),
+        font_size: Some(16.0),
+        background: Some("rain".into()),
+    };
+    let text = toml::to_string(&ui).unwrap();
+    assert_eq!(toml::from_str::<crate::config::UiState>(&text).unwrap(), ui);
+    let mut cfg = crate::config::Config::default();
+    ui.apply(&mut cfg);
+    assert_eq!((cfg.theme.as_str(), cfg.font_size, cfg.background.as_str()), ("Ocean", 16.0, "rain"));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn font_picker_finds_installed_monospace_fonts() {
+    let fonts = crate::font::discover_monospace();
+    // CI and most desktops ship DejaVu or Liberation; skip quietly on minimal systems.
+    if fonts.is_empty() {
+        return;
+    }
+    assert!(fonts.windows(2).all(|w| w[0].family.to_lowercase() <= w[1].family.to_lowercase()));
+    for f in &fonts {
+        assert!(crate::font::Fonts::new(Some(&f.path), 16.0, 13.0).is_ok(), "{} failed to load", f.family);
+    }
 }

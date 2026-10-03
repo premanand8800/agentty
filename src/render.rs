@@ -329,7 +329,23 @@ pub fn draw_chrome(f: &mut Frame, fonts: &mut Fonts, theme: &Theme, l: &Layout, 
 }
 
 /// Draw the visible part of a terminal at the layout's grid origin.
-pub fn draw_terminal(f: &mut Frame, fonts: &mut Fonts, theme: &Theme, l: &Layout, term: &Term<Proxy>, focused: bool) {
+/// An ambient background to draw behind the text: effect, time in seconds, intensity 0..1.
+#[derive(Clone, Copy)]
+pub struct Ambient {
+    pub effect: crate::ambient::Effect,
+    pub time: f32,
+    pub intensity: f32,
+}
+
+pub fn draw_terminal(
+    f: &mut Frame,
+    fonts: &mut Fonts,
+    theme: &Theme,
+    l: &Layout,
+    term: &Term<Proxy>,
+    focused: bool,
+    ambient: Option<Ambient>,
+) {
     let (ox, oy) = l.grid_origin();
     let grid_bottom = l.h.saturating_sub(l.status_h);
     f.fill(0, (l.title_h + l.tabs_h) as isize, l.w, grid_bottom.saturating_sub(l.title_h + l.tabs_h), theme.bg);
@@ -384,6 +400,13 @@ pub fn draw_terminal(f: &mut Frame, fonts: &mut Fonts, theme: &Theme, l: &Layout
         if flags.contains(Flags::STRIKEOUT) {
             f.fill(x as isize, (y + chh / 2) as isize, width, 1.max(l.scale as usize), fg);
         }
+    }
+
+    // Ambient background, after the text so it only touches plain background pixels.
+    if let Some(a) = ambient {
+        let top = (l.title_h + l.tabs_h) as f32;
+        let area = crate::ambient::Area { x: 0.0, y: top, w: l.w as f32, h: grid_bottom as f32 - top };
+        crate::ambient::draw(f, a.effect, area, a.time, theme, a.intensity, l.scale);
     }
 
     // Cursor.

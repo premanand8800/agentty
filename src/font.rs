@@ -362,3 +362,114 @@ impl Fonts {
         font.as_scaled(em(font, self.ui_px)).ascent()
     }
 }
+
+/// An installed monospace font the picker can switch to.
+#[derive(Clone, Debug)]
+pub struct MonoFont {
+    pub family: String,
+    pub path: PathBuf,
+}
+
+fn font_dirs() -> Vec<PathBuf> {
+    let home = crate::config::home();
+    #[cfg(target_os = "macos")]
+    let dirs =
+        vec![PathBuf::from("/System/Library/Fonts"), PathBuf::from("/Library/Fonts"), home.join("Library/Fonts")];
+    #[cfg(windows)]
+    let dirs = {
+        let mut d = vec![sys_fonts()];
+        let local =
+            std::env::var_os("LOCALAPPDATA").map(PathBuf::from).unwrap_or_else(|| home.join("AppData").join("Local"));
+        d.push(local.join("Microsoft").join("Windows").join("Fonts"));
+        d
+    };
+    #[cfg(not(any(target_os = "macos", windows)))]
+    let dirs = vec![
+        PathBuf::from("/usr/share/fonts"),
+        PathBuf::from("/usr/local/share/fonts"),
+        home.join(".local/share/fonts"),
+        home.join(".fonts"),
+    ];
+    dirs
+}
+
+/// Monospace fonts installed on this machine, regular style, one per family, sorted by name.
+/// Only files whose names look like code fonts are opened, so this stays fast.
+pub fn discover_monospace() -> Vec<MonoFont> {
+    const HINTS: &[&str] = &[
+        "mono",
+        "code",
+        "consol",
+        "menlo",
+        "monaco",
+        "courier",
+        "cour",
+        "hack",
+        "iosevka",
+        "inconsolata",
+        "terminus",
+        "fixed",
+        "cascadia",
+        "typewriter",
+    ];
+    let mut found: Vec<MonoFont> = Vec::new();
+    let mut stack: Vec<(PathBuf, u8)> = font_dirs().into_iter().map(|d| (d, 0)).collect();
+    while let Some((dir, depth)) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if depth < 4 {
+                    stack.push((path, depth + 1));
+                }
+                continue;
+            }
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_ascii_lowercase();
+            let is_font = [".ttf", ".otf", ".ttc"].iter().any(|e| name.ends_with(e));
+            if !is_font || !HINTS.iter().any(|h| name.contains(h)) {
+                continue;
+            }
+            let Ok(data) = std::fs::read(&path) else { continue };
+            let Ok(face) = ttf_parser::Face::parse(&data, 0) else { continue };
+            // Some families (Ubuntu Mono) don't set the bold flag on their bold file: check the weight too.
+            let weight = face.weight().to_number();
+            if !face.is_monospaced() || face.is_bold() || face.is_italic() || face.is_oblique() || weight > 450 {
+                continue;
+            }
+            let family = face
+                .names()
+                .into_iter()
+                .filter(|n| {
+                    n.name_id == ttf_parser::name_id::TYPOGRAPHIC_FAMILY || n.name_id == ttf_parser::name_id::FAMILY
+                })
+                .find_map(|n| n.to_string())
+                .unwrap_or_else(|| path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default());
+            if !found.iter().any(|f| f.family.eq_ignore_ascii_case(&family)) {
+                // Distros symlink style names (UbuntuMono-B.ttf) to one variable font: show the real file.
+                let path = std::fs::canonicalize(&path).unwrap_or(path);
+                found.push(MonoFont { family, path });
+            }
+        }
+    }
+    found.sort_by_key(|f| f.family.to_lowercase());
+    found
+}
+
+/// Resolve the `font` setting: a path to a font file, or a family name such as "JetBrains Mono".
+pub fn resolve_font_setting(value: &str) -> Option<PathBuf> {
+    let p = PathBuf::from(value);
+    if p.is_file() {
+        return Some(p);
+    }
+    discover_monospace().into_iter().find(|f| f.family.eq_ignore_ascii_case(value.trim())).map(|f| f.path)
+}
+
+/// Family name of the font at `path` (for the status bar).
+pub fn family_of(path: &Path) -> Option<String> {
+    let data = std::fs::read(path).ok()?;
+    let face = ttf_parser::Face::parse(&data, 0).ok()?;
+    face.names()
+        .into_iter()
+        .filter(|n| n.name_id == ttf_parser::name_id::TYPOGRAPHIC_FAMILY || n.name_id == ttf_parser::name_id::FAMILY)
+        .find_map(|n| n.to_string())
+}

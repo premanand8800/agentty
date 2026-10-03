@@ -36,6 +36,7 @@ dependencies = [
  "serde_json",
  "softbuffer",
  "toml",
+ "ttf-parser",
  "winit",
  "zbus",
 ]

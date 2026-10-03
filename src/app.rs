@@ -63,6 +63,15 @@ pub struct App {
     os_title: String,
     badge: crate::badge::Badge,
     scroll_accum: f64,
+    effect: crate::ambient::Effect,
+    occluded: bool,
+    last_anim: Instant,
+    /// Installed monospace fonts, discovered on the first Ctrl+Shift+F (not at startup).
+    font_list: Option<Vec<crate::font::MonoFont>>,
+    font_name: String,
+    /// Short confirmation shown in the status bar ("Background: rain").
+    flash: Option<(String, Instant)>,
+    ui: crate::config::UiState,
 }
 
 /// Resident memory in MB, shown in the status bar. Linux only for now (0 = unknown).
@@ -108,6 +117,8 @@ fn app_modifier(m: ModifiersState) -> bool {
     }
 }
 
+const FLASH_FOR: Duration = Duration::from_millis(2500);
+
 const HINTS: &str =
     if cfg!(target_os = "macos") { "⌘P theme · ⌘T tab" } else { "Ctrl+Shift+P theme · Ctrl+Shift+T tab" };
 /// macOS draws its own title-bar buttons; elsewhere agentty draws macOS-style ones.
@@ -122,7 +133,16 @@ impl App {
     ) -> Result<App, String> {
         let theme = theme::by_name(&cfg.theme).unwrap_or(0);
         let font_pt = cfg.font_size;
-        let fonts = Fonts::new(cfg.font.as_deref(), font_pt * PX_PER_PT, UI_PX)?;
+        let font_path = cfg.font.as_deref().and_then(|f| {
+            let p = crate::font::resolve_font_setting(f);
+            if p.is_none() {
+                eprintln!("agentty: font '{f}' not found; using the default");
+            }
+            p
+        });
+        let fonts = Fonts::new(font_path.as_deref(), font_pt * PX_PER_PT, UI_PX)?;
+        let font_name = font_path.as_deref().and_then(crate::font::family_of).unwrap_or_else(|| "default".into());
+        let effect = crate::ambient::Effect::parse(&cfg.background).unwrap_or(crate::ambient::Effect::Off);
         Ok(App {
             cfg,
             proxy,
@@ -150,6 +170,13 @@ impl App {
             os_title: String::new(),
             badge: crate::badge::Badge::new(),
             scroll_accum: 0.0,
+            effect,
+            occluded: false,
+            last_anim: Instant::now(),
+            font_list: None,
+            font_name,
+            flash: None,
+            ui: crate::config::UiState::load(),
         })
     }
 
@@ -385,7 +412,11 @@ impl App {
                 };
                 let scrolled = s.term.lock().grid().display_offset();
                 let hint = if scrolled > 0 {
-                    if cfg!(target_os = "macos") { " · ↑ scrolled back · type to return" } else { " · ↑ scrolled back · Shift+End to return" }
+                    if cfg!(target_os = "macos") {
+                        " · ↑ scrolled back · type to return"
+                    } else {
+                        " · ↑ scrolled back · Shift+End to return"
+                    }
                 } else {
                     hint
                 };
@@ -393,9 +424,13 @@ impl App {
                     Status::Exited(c) => format!("exited ({c})"),
                     other => other.label().to_string(),
                 };
+                let left = match &self.flash {
+                    Some((msg, at)) if at.elapsed() < FLASH_FOR => msg.clone(),
+                    _ => format!("{} · {}{}", s.profile, st_label, hint),
+                };
                 (
                     format!("{} — {}×{}", s.title, s.dims.cols, s.dims.rows),
-                    format!("{} · {}{}", s.profile, st_label, hint),
+                    left,
                     if self.mem_mb > 0.0 {
                         format!("{} · {:.0} MB · {HINTS}", theme.name, self.mem_mb)
                     } else {
@@ -430,7 +465,12 @@ impl App {
             frame.fill(0, 0, frame.w, frame.h, theme.bg);
             if let Some(s) = self.sessions.get(self.active) {
                 let term = s.term.lock();
-                render::draw_terminal(&mut frame, &mut self.fonts, theme, &layout, &term, self.focused);
+                let ambient = (self.effect != crate::ambient::Effect::Off).then(|| render::Ambient {
+                    effect: self.effect,
+                    time: self.started.elapsed().as_secs_f32(),
+                    intensity: self.cfg.background_intensity,
+                });
+                render::draw_terminal(&mut frame, &mut self.fonts, theme, &layout, &term, self.focused, ambient);
             }
             render::draw_chrome(&mut frame, &mut self.fonts, theme, &layout, &chrome);
         }
@@ -625,9 +665,65 @@ impl App {
     }
 
     fn change_font(&mut self, delta: f32) {
-        self.font_pt = if delta == 0.0 { self.cfg.font_size } else { (self.font_pt + delta).clamp(6.0, 48.0) };
+        let default = crate::config::Config::default().font_size;
+        self.font_pt = if delta == 0.0 { default } else { (self.font_pt + delta).clamp(6.0, 48.0) };
         self.apply_scale(self.scale);
+        self.ui.font_size = Some(self.font_pt);
+        self.save_ui();
+        self.show(format!("Font size: {}", self.font_pt));
+    }
+
+    /// Show a short confirmation in the status bar.
+    fn show(&mut self, msg: String) {
+        self.flash = Some((msg, Instant::now()));
         self.redraw();
+    }
+
+    fn save_ui(&self) {
+        if let Err(e) = self.ui.save() {
+            eprintln!("agentty: cannot save settings: {e}");
+        }
+    }
+
+    fn next_theme(&mut self) {
+        self.theme = (self.theme + 1) % THEMES.len();
+        self.ui.theme = Some(THEMES[self.theme].name.to_string());
+        self.save_ui();
+        self.show(format!("Theme: {}", THEMES[self.theme].name));
+    }
+
+    fn next_background(&mut self) {
+        self.effect = self.effect.next();
+        self.ui.background = Some(self.effect.name().to_string());
+        self.save_ui();
+        let hint = if self.effect == crate::ambient::Effect::Off { "" } else { " · press again for the next one" };
+        self.show(format!("Background: {}{hint}", self.effect.name()));
+    }
+
+    /// Switch to the next installed monospace font.
+    fn next_font(&mut self) {
+        if self.font_list.is_none() {
+            self.font_list = Some(crate::font::discover_monospace());
+        }
+        let list = self.font_list.as_deref().unwrap_or_default();
+        if list.is_empty() {
+            self.show("No other monospace fonts found".into());
+            return;
+        }
+        let current = list.iter().position(|f| f.family.eq_ignore_ascii_case(&self.font_name));
+        let index = current.map_or(0, |i| (i + 1) % list.len());
+        let (next, n) = (list[index].clone(), list.len());
+        match Fonts::new(Some(&next.path), self.fonts.px, self.fonts.ui_px) {
+            Ok(fonts) => {
+                self.fonts = fonts;
+                self.font_name = next.family.clone();
+                self.apply_scale(self.scale);
+                self.ui.font = Some(next.family.clone());
+                self.save_ui();
+                self.show(format!("Font: {} ({}/{n})", next.family, index + 1));
+            }
+            Err(e) => self.show(format!("Cannot load {}: {e}", next.family)),
+        }
     }
 
     fn cycle_tab(&mut self, forward: bool) {
@@ -647,10 +743,9 @@ impl App {
                 KeyCode::KeyW => self.close(self.active, el),
                 KeyCode::KeyC => self.copy(),
                 KeyCode::KeyV => self.paste(),
-                KeyCode::KeyP => {
-                    self.theme = (self.theme + 1) % THEMES.len();
-                    self.redraw();
-                }
+                KeyCode::KeyP => self.next_theme(),
+                KeyCode::KeyB => self.next_background(),
+                KeyCode::KeyF => self.next_font(),
                 KeyCode::Equal => self.change_font(1.0),
                 KeyCode::Minus => self.change_font(-1.0),
                 KeyCode::Digit0 => self.change_font(0.0),
@@ -800,6 +895,15 @@ impl App {
                     json!({"ok": false, "error": "unknown theme", "themes": THEMES.iter().map(|t| t.name).collect::<Vec<_>>()})
                 }
             },
+            Request::Background { name } => match crate::ambient::Effect::parse(&name) {
+                Some(e) => {
+                    self.effect = e;
+                    self.redraw();
+                    json!({"ok": true, "background": e.name()})
+                }
+                None => json!({"ok": false, "error": "unknown background",
+                               "backgrounds": crate::ambient::Effect::ALL.iter().map(|e| e.name()).collect::<Vec<_>>()}),
+            },
             Request::Wait { .. } => json!({"ok": false, "error": "wait is handled by the socket thread"}),
         }
     }
@@ -873,6 +977,12 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                 self.apply_scale(scale_factor as f32);
                 self.redraw();
+            }
+            WindowEvent::Occluded(o) => {
+                self.occluded = o;
+                if !o {
+                    self.redraw();
+                }
             }
             WindowEvent::Focused(f) => {
                 self.focused = f;
@@ -956,10 +1066,31 @@ impl ApplicationHandler<UserEvent> for App {
                 || (!s.attention_checked
                     && s.last_output.is_some_and(|t| now.duration_since(t) < session::ATTENTION_QUIET * 2))
         });
-        if busy {
-            el.set_control_flow(ControlFlow::WaitUntil(now + Duration::from_millis(250)));
-        } else {
-            el.set_control_flow(ControlFlow::Wait);
+        let mut wake: Option<Instant> = busy.then(|| now + Duration::from_millis(250));
+        // Ambient animation: a frame every 1/fps (half rate when unfocused), none when hidden.
+        if self.effect != crate::ambient::Effect::Off && !self.occluded {
+            let fps = if self.focused { self.cfg.background_fps } else { (self.cfg.background_fps / 2).max(1) };
+            let interval = Duration::from_secs_f32(1.0 / fps as f32);
+            if now.duration_since(self.last_anim) >= interval {
+                self.last_anim = now;
+                self.redraw();
+            }
+            let next = self.last_anim + interval;
+            wake = Some(wake.map_or(next, |w| w.min(next)));
+        }
+        // Clear the status-bar confirmation when it expires.
+        if let Some((_, at)) = &self.flash {
+            let end = *at + FLASH_FOR;
+            if now >= end {
+                self.flash = None;
+                self.redraw();
+            } else {
+                wake = Some(wake.map_or(end, |w| w.min(end)));
+            }
+        }
+        match wake {
+            Some(t) => el.set_control_flow(ControlFlow::WaitUntil(t)),
+            None => el.set_control_flow(ControlFlow::Wait),
         }
     }
 }

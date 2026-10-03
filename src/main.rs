@@ -3,6 +3,7 @@
 // A GUI app on Windows: no console window behind it.
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+mod ambient;
 mod app;
 mod badge;
 mod boxdraw;
@@ -28,13 +29,14 @@ const HELP: &str = "agentty: a lightweight terminal for AI coding agents
 usage:
   agentty [--profile NAME]          open the window (first tab: NAME, default: your shell)
   agentty ctl <command>             control a running agentty (see `agentty ctl help`)
-  agentty snapshot --out FILE.png [--theme NAME] [--cols N] [--rows N] [--scale F] [--wait-ms MS] -- <command...>
-  agentty themes | profiles | --version
+  agentty snapshot --out FILE.png [--theme NAME] [--cols N] [--rows N] [--scale F] [--wait-ms MS] [--background NAME] -- <command...>
+  agentty themes | fonts | backgrounds | profiles | --version
 
 shortcuts:
   Ctrl+Shift+T new tab        Ctrl+Shift+1..9 open profile N     Ctrl+Shift+W close tab
   Ctrl+Tab / Alt+1..9 switch  Ctrl+Shift+C / V copy / paste       Ctrl+Shift+P next theme
-  Ctrl+Shift+= / - / 0 font   Shift+PageUp/PageDown scrollback
+  Ctrl+Shift+= / - / 0 size   Ctrl+Shift+F next font             Ctrl+Shift+B background
+  Shift+PageUp/PageDown scrollback
   (macOS: Cmd instead of Ctrl+Shift, e.g. Cmd+T, Cmd+W, Cmd+C)
 
 config: ~/.config/agentty/config.toml (Windows: %APPDATA%\\agentty\\config.toml)";
@@ -58,6 +60,16 @@ fn main() {
         Some("themes") => {
             for t in theme::THEMES.iter() {
                 println!("{}{}", t.name, if t.name.eq_ignore_ascii_case(&cfg.theme) { "  (current)" } else { "" });
+            }
+        }
+        Some("fonts") => {
+            for f in font::discover_monospace() {
+                println!("{:<28} {}", f.family, f.path.display());
+            }
+        }
+        Some("backgrounds") => {
+            for e in ambient::Effect::ALL {
+                println!("{}{}", e.name(), if e.name() == cfg.background { "  (current)" } else { "" });
             }
         }
         Some("profiles") => {
@@ -100,6 +112,8 @@ fn main() {
                 } else {
                     cmd.to_vec()
                 },
+                background: arg_value(opts, "--background").and_then(|v| ambient::Effect::parse(&v)),
+                time: arg_value(opts, "--time").and_then(|v| v.parse().ok()).unwrap_or(5.0),
             };
             if let Err(e) = snapshot::run(&cfg, o) {
                 eprintln!("agentty: {e}");

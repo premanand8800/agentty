@@ -24,6 +24,8 @@ pub struct Options {
     pub title: Option<String>,
     pub tabs: Vec<(String, Status)>,
     pub command: Vec<String>,
+    pub background: Option<crate::ambient::Effect>,
+    pub time: f32,
 }
 
 pub fn run(cfg: &Config, o: Options) -> Result<(), String> {
@@ -34,7 +36,8 @@ pub fn run(cfg: &Config, o: Options) -> Result<(), String> {
         .transpose()?
         .unwrap_or_else(|| theme::by_name(&cfg.theme).unwrap_or(0));
     let theme = &THEMES[theme_idx];
-    let mut fonts = Fonts::new(cfg.font.as_deref(), cfg.font_size * 1.25 * o.scale, 13.0 * o.scale)?;
+    let font_path = cfg.font.as_deref().and_then(crate::font::resolve_font_setting);
+    let mut fonts = Fonts::new(font_path.as_deref(), cfg.font_size * 1.25 * o.scale, 13.0 * o.scale)?;
     let show_tabs = !o.tabs.is_empty();
     // Size the window so the grid is exactly cols x rows.
     let probe = Layout::new(0, 0, o.scale, show_tabs);
@@ -91,7 +94,12 @@ pub fn run(cfg: &Config, o: Options) -> Result<(), String> {
     frame.fill(0, 0, w, h, theme.bg);
     {
         let term = s.term.lock();
-        render::draw_terminal(&mut frame, &mut fonts, theme, &layout, &term, true);
+        let ambient = o.background.filter(|e| *e != crate::ambient::Effect::Off).map(|effect| render::Ambient {
+            effect,
+            time: o.time,
+            intensity: cfg.background_intensity,
+        });
+        render::draw_terminal(&mut frame, &mut fonts, theme, &layout, &term, true, ambient);
     }
     let title = o.title.clone().unwrap_or_else(|| s.title.clone());
     let mut tabs: Vec<TabInfo> = o.tabs.iter().map(|(t, st)| TabInfo { title: t.clone(), status: *st }).collect();
@@ -107,7 +115,7 @@ pub fn run(cfg: &Config, o: Options) -> Result<(), String> {
         hover: Hover::None,
         focused: true,
         status_left: format!("{} · {}", tabs[0].title, active_status.label()),
-        status_right: format!("{} · Ctrl+Shift+P theme · Ctrl+Shift+T tab", theme.name),
+        status_right: format!("{} · Ctrl+Shift+P theme · F font · B background", theme.name),
         pulse: 0.0,
     };
     render::draw_chrome(&mut frame, &mut fonts, theme, &layout, &chrome);
