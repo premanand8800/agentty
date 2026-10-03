@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=agentty
+GenericName=Terminal
+Comment=Lightweight terminal for running and supervising AI coding agents
+Exec=agentty
+Icon=agentty
+Terminal=false
+Categories=System;TerminalEmulator;Development;
+Keywords=terminal;shell;ai;agent;claude;codex;
+StartupWMClass=agentty

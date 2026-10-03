@@ -1,0 +1,116 @@
+//! `~/.config/agentty/config.toml`. Every key is optional.
+
+use serde::Deserialize;
+use std::path::PathBuf;
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Config {
+    /// One of the names in `agentty themes`.
+    pub theme: String,
+    pub font_size: f32,
+    /// Path to a monospace TTF/OTF. Default: the first system font found (DejaVu Sans Mono, which Menlo is based on).
+    pub font: Option<PathBuf>,
+    /// Lines kept per tab. Agents print a lot; this bounds memory.
+    pub scrollback: usize,
+    /// Desktop notification when a background tab needs you.
+    pub notifications: bool,
+    /// Phrases that mean "an agent is waiting for you" when they appear on screen after output stops.
+    pub attention_phrases: Vec<String>,
+    /// Profile opened in the first tab.
+    pub startup_profile: Option<String>,
+    pub profiles: Vec<Profile>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Profile {
+    pub name: String,
+    pub command: Vec<String>,
+    #[serde(default)]
+    pub cwd: Option<PathBuf>,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Config {
+            theme: "Pro".into(),
+            font_size: 13.5,
+            font: None,
+            scrollback: 5000,
+            notifications: true,
+            attention_phrases: [
+                "do you want to",
+                "(y/n)",
+                "[y/n]",
+                "allow once",
+                "approve",
+                "press enter to",
+                "waiting for your",
+                "permission",
+                "❯ 1. yes",
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+            startup_profile: None,
+            profiles: Vec::new(),
+        }
+    }
+}
+
+pub fn config_path() -> PathBuf {
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home().join(".config"));
+    base.join("agentty").join("config.toml")
+}
+
+pub fn home() -> PathBuf {
+    std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"))
+}
+
+fn on_path(bin: &str) -> bool {
+    std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).any(|d| d.join(bin).is_file()))
+        .unwrap_or(false)
+}
+
+impl Config {
+    pub fn load() -> Result<Config, String> {
+        let path = config_path();
+        let mut cfg = match std::fs::read_to_string(&path) {
+            Ok(text) => toml::from_str::<Config>(&text).map_err(|e| format!("{}: {e}", path.display()))?,
+            Err(_) => Config::default(),
+        };
+        cfg.font_size = cfg.font_size.clamp(6.0, 48.0);
+        cfg.scrollback = cfg.scrollback.min(200_000);
+        if cfg.profiles.is_empty() {
+            cfg.profiles = default_profiles();
+        }
+        Ok(cfg)
+    }
+
+    pub fn profile(&self, name: &str) -> Option<&Profile> {
+        self.profiles.iter().find(|p| p.name.eq_ignore_ascii_case(name))
+    }
+}
+
+/// The user's shell, then every agent CLI found on PATH.
+pub fn default_profiles() -> Vec<Profile> {
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into());
+    let mut profiles = vec![Profile { name: "Shell".into(), command: vec![shell], cwd: None }];
+    for (name, bin) in [
+        ("Claude", "claude"),
+        ("Codex", "codex"),
+        ("Antigravity", "agy"),
+        ("Gemini", "gemini"),
+        ("Aider", "aider"),
+        ("Goose", "goose"),
+    ] {
+        if on_path(bin) {
+            profiles.push(Profile { name: name.into(), command: vec![bin.into()], cwd: None });
+        }
+    }
+    profiles
+}
