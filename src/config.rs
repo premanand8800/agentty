@@ -60,20 +60,60 @@ impl Default for Config {
 }
 
 pub fn config_path() -> PathBuf {
-    let base = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home().join(".config"));
+    #[cfg(windows)]
+    let base = std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_else(|| home().join("AppData").join("Roaming"));
+    #[cfg(not(windows))]
+    let base = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).unwrap_or_else(|| home().join(".config"));
     base.join("agentty").join("config.toml")
 }
 
 pub fn home() -> PathBuf {
-    std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"))
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/"))
 }
 
-fn on_path(bin: &str) -> bool {
-    std::env::var_os("PATH")
-        .map(|p| std::env::split_paths(&p).any(|d| d.join(bin).is_file()))
-        .unwrap_or(false)
+/// Full path of `bin` on PATH. On Windows also tries PATHEXT (.exe, .cmd, ...).
+fn find_on_path(bin: &str) -> Option<PathBuf> {
+    let exts: Vec<String> = if cfg!(windows) {
+        std::env::var("PATHEXT")
+            .unwrap_or_else(|_| ".EXE;.CMD;.BAT".into())
+            .split(';')
+            .map(|e| e.to_ascii_lowercase())
+            .chain(std::iter::once(String::new()))
+            .collect()
+    } else {
+        vec![String::new()]
+    };
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .flat_map(|dir| exts.iter().map(move |ext| dir.join(format!("{bin}{ext}"))))
+        .find(|p| p.is_file())
+}
+
+/// The command to start `bin`. Windows runs npm's .cmd shims through cmd.exe.
+fn agent_command(bin: &str) -> Option<Vec<String>> {
+    let path = find_on_path(bin)?;
+    let is_script = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("cmd") || e.eq_ignore_ascii_case("bat"));
+    Some(if is_script {
+        vec!["cmd.exe".into(), "/c".into(), path.to_string_lossy().into_owned()]
+    } else {
+        vec![bin.to_string()]
+    })
+}
+
+fn default_shell() -> Vec<String> {
+    if cfg!(windows) {
+        let ps = if find_on_path("pwsh").is_some() { "pwsh.exe" } else { "powershell.exe" };
+        vec![ps.into(), "-NoLogo".into()]
+    } else {
+        let fallback = if cfg!(target_os = "macos") { "/bin/zsh" } else { "/bin/bash" };
+        vec![std::env::var("SHELL").unwrap_or_else(|_| fallback.into())]
+    }
 }
 
 impl Config {
@@ -98,8 +138,7 @@ impl Config {
 
 /// The user's shell, then every agent CLI found on PATH.
 pub fn default_profiles() -> Vec<Profile> {
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into());
-    let mut profiles = vec![Profile { name: "Shell".into(), command: vec![shell], cwd: None }];
+    let mut profiles = vec![Profile { name: "Shell".into(), command: default_shell(), cwd: None }];
     for (name, bin) in [
         ("Claude", "claude"),
         ("Codex", "codex"),
@@ -108,8 +147,8 @@ pub fn default_profiles() -> Vec<Profile> {
         ("Aider", "aider"),
         ("Goose", "goose"),
     ] {
-        if on_path(bin) {
-            profiles.push(Profile { name: name.into(), command: vec![bin.into()], cwd: None });
+        if let Some(command) = agent_command(bin) {
+            profiles.push(Profile { name: name.into(), command, cwd: None });
         }
     }
     profiles

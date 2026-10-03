@@ -103,6 +103,7 @@ pub struct Spawn<'a> {
 }
 
 impl Session {
+    #[allow(clippy::field_reassign_with_default)]
     pub fn spawn(s: Spawn) -> std::io::Result<Session> {
         let (program, args) = s
             .command
@@ -116,12 +117,12 @@ impl Session {
         env.insert("TERM_PROGRAM_VERSION".to_string(), env!("CARGO_PKG_VERSION").to_string());
         env.insert("AGENTTY_TAB_ID".to_string(), s.id.to_string());
         env.extend(s.extra_env);
-        let options = Options {
-            shell: Some(Shell::new(program, args)),
-            working_directory: s.cwd.or_else(|| std::env::current_dir().ok()),
-            drain_on_exit: true,
-            env,
-        };
+        // Field by field: tty::Options has an extra field on Windows, so a struct literal won't compile there.
+        let mut options = Options::default();
+        options.shell = Some(Shell::new(program, args));
+        options.working_directory = s.cwd.or_else(|| Some(crate::config::home()));
+        options.drain_on_exit = true;
+        options.env = env;
         let size = window_size(s.dims, s.cell_w, s.cell_h);
         let pty = tty::new(&options, size, s.id as u64)?;
         let proxy = Proxy { id: s.id, sink: s.sink };

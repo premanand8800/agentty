@@ -8,40 +8,152 @@ use ab_glyph::{Font, FontVec, PxScale, ScaleFont};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-const MONO_CANDIDATES: &[&str] = &[
-    // Menlo (macOS Terminal's font) is derived from DejaVu Sans Mono.
-    "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
-    "/usr/share/fonts/TTF/DejaVuSansMono.ttf",
-    "/usr/share/fonts/dejavu/DejaVuSansMono.ttf",
-    "/usr/share/fonts/truetype/noto/NotoSansMono-Regular.ttf",
-    "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
-];
-const UI_CANDIDATES: &[&str] = &[
-    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-    "/usr/share/fonts/TTF/DejaVuSans.ttf",
-    "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
-];
+/// A font file and the face index inside it (.ttc collections hold several faces).
+#[derive(Clone)]
+struct Face {
+    path: PathBuf,
+    index: u32,
+}
+
+fn face(path: impl Into<PathBuf>, index: u32) -> Face {
+    Face { path: path.into(), index }
+}
+
+/// A monospace family: regular, bold, italic, bold italic.
+struct Family(Face, Option<Face>, Option<Face>, Option<Face>);
+
+#[cfg(windows)]
+fn sys_fonts() -> PathBuf {
+    PathBuf::from(std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into())).join("Fonts")
+}
+
+fn mono_families() -> Vec<Family> {
+    #[cfg(target_os = "macos")]
+    {
+        let menlo = "/System/Library/Fonts/Menlo.ttc";
+        vec![
+            Family(face(menlo, 0), Some(face(menlo, 1)), Some(face(menlo, 2)), Some(face(menlo, 3))),
+            Family(face("/System/Library/Fonts/Monaco.ttf", 0), None, None, None),
+        ]
+    }
+    #[cfg(windows)]
+    {
+        let f = sys_fonts();
+        vec![
+            Family(
+                face(f.join("consola.ttf"), 0),
+                Some(face(f.join("consolab.ttf"), 0)),
+                Some(face(f.join("consolai.ttf"), 0)),
+                Some(face(f.join("consolaz.ttf"), 0)),
+            ),
+            Family(face(f.join("CascadiaMono.ttf"), 0), None, None, None),
+            Family(
+                face(f.join("cour.ttf"), 0),
+                Some(face(f.join("courbd.ttf"), 0)),
+                Some(face(f.join("couri.ttf"), 0)),
+                Some(face(f.join("courbi.ttf"), 0)),
+            ),
+        ]
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
+    {
+        // Menlo (macOS Terminal's font) is derived from DejaVu Sans Mono.
+        let mut out = Vec::new();
+        for dir in ["/usr/share/fonts/truetype/dejavu", "/usr/share/fonts/TTF", "/usr/share/fonts/dejavu"] {
+            let p = |n: &str| face(format!("{dir}/{n}"), 0);
+            out.push(Family(
+                p("DejaVuSansMono.ttf"),
+                Some(p("DejaVuSansMono-Bold.ttf")),
+                Some(p("DejaVuSansMono-Oblique.ttf")),
+                Some(p("DejaVuSansMono-BoldOblique.ttf")),
+            ));
+        }
+        let n = |f: &str| face(format!("/usr/share/fonts/truetype/{f}"), 0);
+        out.push(Family(n("noto/NotoSansMono-Regular.ttf"), Some(n("noto/NotoSansMono-Bold.ttf")), None, None));
+        out.push(Family(
+            n("liberation/LiberationMono-Regular.ttf"),
+            Some(n("liberation/LiberationMono-Bold.ttf")),
+            Some(n("liberation/LiberationMono-Italic.ttf")),
+            Some(n("liberation/LiberationMono-BoldItalic.ttf")),
+        ));
+        out
+    }
+}
+
+fn ui_candidates() -> Vec<Face> {
+    #[cfg(target_os = "macos")]
+    {
+        vec![face("/System/Library/Fonts/SFNS.ttf", 0), face("/System/Library/Fonts/Helvetica.ttc", 0)]
+    }
+    #[cfg(windows)]
+    {
+        vec![face(sys_fonts().join("segoeui.ttf"), 0), face(sys_fonts().join("arial.ttf"), 0)]
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
+    {
+        [
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/TTF/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+        ]
+        .into_iter()
+        .map(|p| face(p, 0))
+        .collect()
+    }
+}
+
 /// Tried in order, each loaded only on the first character the earlier fonts lack.
-const FALLBACK_CANDIDATES: &[&str] = &[
-    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-    "/usr/share/fonts/truetype/noto/NotoSansSymbols2-Regular.ttf",
-    "/usr/share/fonts/truetype/noto/NotoSansSymbols-Regular.ttf",
-    "/usr/share/fonts/truetype/noto/NotoSansMath-Regular.ttf",
-    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-    "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
-];
+fn fallback_candidates() -> Vec<Face> {
+    #[cfg(target_os = "macos")]
+    {
+        [
+            "/System/Library/Fonts/Apple Symbols.ttf",
+            "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+            "/System/Library/Fonts/PingFang.ttc",
+            "/System/Library/Fonts/Hiragino Sans GB.ttc",
+        ]
+        .into_iter()
+        .map(|p| face(p, 0))
+        .collect()
+    }
+    #[cfg(windows)]
+    {
+        let f = sys_fonts();
+        ["seguisym.ttf", "segoeui.ttf", "msyh.ttc", "YuGothR.ttc", "malgun.ttf"]
+            .into_iter()
+            .map(|n| face(f.join(n), 0))
+            .collect()
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
+    {
+        [
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/noto/NotoSansSymbols2-Regular.ttf",
+            "/usr/share/fonts/truetype/noto/NotoSansSymbols-Regular.ttf",
+            "/usr/share/fonts/truetype/noto/NotoSansMath-Regular.ttf",
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
+        ]
+        .into_iter()
+        .map(|p| face(p, 0))
+        .collect()
+    }
+}
+
 const MAX_CACHED_GLYPHS: usize = 2048;
 
-fn load(path: &Path) -> Option<FontVec> {
-    let bytes = std::fs::read(path).ok()?;
-    FontVec::try_from_vec(bytes).ok()
+fn load(f: &Face) -> Option<FontVec> {
+    let bytes = std::fs::read(&f.path).ok()?;
+    FontVec::try_from_vec_and_index(bytes, f.index).ok()
 }
 
 fn variant_path(regular: &Path, style: &str) -> Option<PathBuf> {
     let s = regular.to_string_lossy();
     // DejaVu uses -Bold / -Oblique / -BoldOblique; Noto and Liberation use -Bold / -Italic / -BoldItalic.
     let alt = style.replace("Oblique", "Italic");
-    for (a, b) in [("-Regular", format!("-{style}")), ("-Regular", format!("-{alt}")), (".ttf", format!("-{style}.ttf"))] {
+    for (a, b) in
+        [("-Regular", format!("-{style}")), ("-Regular", format!("-{alt}")), (".ttf", format!("-{style}.ttf"))]
+    {
         if s.contains(a) {
             let p = PathBuf::from(s.replacen(a, &b, 1));
             if p.is_file() {
@@ -69,7 +181,7 @@ pub struct Glyph {
 }
 
 struct Fallback {
-    path: &'static str,
+    face: Face,
     font: Option<Option<FontVec>>, // None = not tried yet; Some(None) = failed to load
 }
 
@@ -114,11 +226,19 @@ fn rasterize(font: &FontVec, c: char, px: f32) -> Glyph {
                 }
             });
             Glyph {
-                metrics: Metrics { xmin: b.min.x.floor() as i32, ymin: -(b.min.y.floor() as i32) - height as i32, width, height, advance_width },
+                metrics: Metrics {
+                    xmin: b.min.x.floor() as i32,
+                    ymin: -(b.min.y.floor() as i32) - height as i32,
+                    width,
+                    height,
+                    advance_width,
+                },
                 coverage,
             }
         }
-        None => Glyph { metrics: Metrics { xmin: 0, ymin: 0, width: 0, height: 0, advance_width }, coverage: Vec::new() },
+        None => {
+            Glyph { metrics: Metrics { xmin: 0, ymin: 0, width: 0, height: 0, advance_width }, coverage: Vec::new() }
+        }
     }
 }
 
@@ -128,19 +248,23 @@ fn has(font: &FontVec, c: char) -> bool {
 
 impl Fonts {
     pub fn new(custom: Option<&Path>, px: f32, ui_px: f32) -> Result<Fonts, String> {
-        let regular_path = match custom {
-            Some(p) => p.to_path_buf(),
-            None => MONO_CANDIDATES
-                .iter()
-                .map(PathBuf::from)
-                .find(|p| p.is_file())
+        let (regular, bold, italic, bold_italic) = match custom {
+            Some(p) => {
+                let regular = load(&face(p, 0)).ok_or_else(|| format!("cannot load font {}", p.display()))?;
+                let variant = |style: &str| variant_path(p, style).and_then(|v| load(&face(v, 0)));
+                (regular, variant("Bold"), variant("Oblique"), variant("BoldOblique"))
+            }
+            None => mono_families()
+                .into_iter()
+                .find_map(|Family(r, b, i, bi)| {
+                    let regular = load(&r)?;
+                    let opt = |f: Option<Face>| f.and_then(|f| load(&f));
+                    Some((regular, opt(b), opt(i), opt(bi)))
+                })
                 .ok_or("no monospace font found; set `font` in config.toml")?,
         };
-        let regular = load(&regular_path).ok_or_else(|| format!("cannot load font {}", regular_path.display()))?;
-        let variant = |style: &str| variant_path(&regular_path, style).and_then(|p| load(&p));
-        let (bold, italic, bold_italic) = (variant("Bold"), variant("Oblique"), variant("BoldOblique"));
-        let ui = UI_CANDIDATES.iter().find_map(|p| load(Path::new(p)));
-        let fallbacks = FALLBACK_CANDIDATES.iter().map(|p| Fallback { path: p, font: None }).collect();
+        let ui = ui_candidates().iter().find_map(load);
+        let fallbacks = fallback_candidates().into_iter().map(|face| Fallback { face, font: None }).collect();
         let mut f = Fonts {
             regular,
             bold,
@@ -186,7 +310,7 @@ impl Fonts {
         }
         let mut found = None;
         for (i, fb) in self.fallbacks.iter_mut().enumerate() {
-            let font = fb.font.get_or_insert_with(|| load(Path::new(fb.path)));
+            let font = fb.font.get_or_insert_with(|| load(&fb.face));
             if font.as_ref().is_some_and(|f| has(f, c)) {
                 found = Some(i);
                 break;

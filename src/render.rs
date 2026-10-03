@@ -85,7 +85,17 @@ impl Frame<'_> {
         self.styled_glyph(fonts, ch, bold, false, ui, x, baseline, c)
     }
 
-    fn styled_glyph(&mut self, fonts: &mut Fonts, ch: char, bold: bool, italic: bool, ui: bool, x: f32, baseline: f32, c: Rgb) -> f32 {
+    fn styled_glyph(
+        &mut self,
+        fonts: &mut Fonts,
+        ch: char,
+        bold: bool,
+        italic: bool,
+        ui: bool,
+        x: f32,
+        baseline: f32,
+        c: Rgb,
+    ) -> f32 {
         let g = if ui { fonts.ui_glyph(ch) } else { fonts.styled_glyph(ch, bold, italic) };
         let m = g.metrics;
         let gx = (x + m.xmin as f32).round() as isize;
@@ -120,12 +130,23 @@ pub struct Layout {
     pub tabs_h: usize,
     pub status_h: usize,
     pub pad: usize,
+    /// The OS draws the title-bar buttons (macOS); leave their space empty.
+    pub native_titlebar: bool,
 }
 
 impl Layout {
     pub fn new(w: usize, h: usize, scale: f32, show_tabs: bool) -> Layout {
         let s = |v: f32| (v * scale).round() as usize;
-        Layout { scale, w, h, title_h: s(30.0), tabs_h: if show_tabs { s(30.0) } else { 0 }, status_h: s(24.0), pad: s(10.0) }
+        Layout {
+            scale,
+            w,
+            h,
+            title_h: s(30.0),
+            tabs_h: if show_tabs { s(30.0) } else { 0 },
+            status_h: s(24.0),
+            pad: s(10.0),
+            native_titlebar: false,
+        }
     }
 
     pub fn grid_origin(&self) -> (usize, usize) {
@@ -220,6 +241,9 @@ pub fn draw_chrome(f: &mut Frame, fonts: &mut Fonts, theme: &Theme, l: &Layout, 
     f.fill(0, l.title_h as isize - 1, l.w, 1, ch.border);
     let lights = [(0xFF5F57, 0xE0443E, '×'), (0xFEBC2E, 0xDEA123, '−'), (0x28C840, 0x1AAB29, '+')];
     for (i, (cx, cy)) in l.traffic_lights().into_iter().enumerate() {
+        if l.native_titlebar {
+            break;
+        }
         let (fill, rim, sym) = lights[i];
         let (fill, rim) = if ui.focused || ui.hover == Hover::Lights {
             (Rgb::hex(fill), Rgb::hex(rim))
@@ -232,7 +256,13 @@ pub fn draw_chrome(f: &mut Frame, fonts: &mut Fonts, theme: &Theme, l: &Layout, 
         f.circle(cx, cy, l.light_radius() - 0.6 * s, fill);
         if ui.hover == Hover::Lights {
             let w = fonts.ui_text_width(&sym.to_string()) as f32;
-            f.ui_text(fonts, &sym.to_string(), cx - w / 2.0, cy + fonts.ui_ascent() / 2.0 - 1.5 * s, Rgb::hex(0x4D0000));
+            f.ui_text(
+                fonts,
+                &sym.to_string(),
+                cx - w / 2.0,
+                cy + fonts.ui_ascent() / 2.0 - 1.5 * s,
+                Rgb::hex(0x4D0000),
+            );
         }
     }
     let title_max = l.w.saturating_sub((180.0 * s) as usize);
@@ -264,7 +294,14 @@ pub fn draw_chrome(f: &mut Frame, fonts: &mut Fonts, theme: &Theme, l: &Layout, 
                 None
             };
             if let Some(bg) = bg {
-                f.rounded((x + inset) as isize, (top + inset) as isize, w - 2 * inset, l.tabs_h - 2 * inset, 6.0 * s, bg);
+                f.rounded(
+                    (x + inset) as isize,
+                    (top + inset) as isize,
+                    w - 2 * inset,
+                    l.tabs_h - 2 * inset,
+                    6.0 * s,
+                    bg,
+                );
             }
             let dot_x = x as f32 + 16.0 * s;
             let dot_y = top as f32 + l.tabs_h as f32 / 2.0;
@@ -333,7 +370,9 @@ pub fn draw_terminal(f: &mut Frame, fonts: &mut Fonts, theme: &Theme, l: &Layout
             f.fill(x as isize, y as isize, width, chh, bg);
         }
         let c = cell.c;
-        if c != ' ' && c != '\0' && !flags.contains(Flags::HIDDEN)
+        if c != ' '
+            && c != '\0'
+            && !flags.contains(Flags::HIDDEN)
             && !crate::boxdraw::draw(f, c, x, y, width, chh, fg, l.scale)
         {
             let italic = flags.contains(Flags::ITALIC);
@@ -366,12 +405,22 @@ pub fn draw_terminal(f: &mut Frame, fonts: &mut Fonts, theme: &Theme, l: &Layout
         } else {
             match cursor.shape {
                 CursorShape::Beam => f.fill(x, y, (2.0 * l.scale) as usize, chh, color),
-                CursorShape::Underline => f.fill(x, y + chh as isize - (2.0 * l.scale) as isize, cw, (2.0 * l.scale) as usize, color),
+                CursorShape::Underline => {
+                    f.fill(x, y + chh as isize - (2.0 * l.scale) as isize, cw, (2.0 * l.scale) as usize, color)
+                }
                 _ => {
                     f.fill(x, y, cw, chh, color);
                     let cell = &term.grid()[cursor.point];
                     if cell.c != ' ' {
-                        f.glyph(fonts, cell.c, cell.flags.contains(Flags::BOLD), false, x as f32, y as f32 + fonts.ascent, theme.bg);
+                        f.glyph(
+                            fonts,
+                            cell.c,
+                            cell.flags.contains(Flags::BOLD),
+                            false,
+                            x as f32,
+                            y as f32 + fonts.ascent,
+                            theme.bg,
+                        );
                     }
                 }
             }

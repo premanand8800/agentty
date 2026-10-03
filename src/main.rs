@@ -1,6 +1,10 @@
 //! agentty: a lightweight terminal for running and supervising AI coding agents.
 
+// A GUI app on Windows: no console window behind it.
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 mod app;
+mod badge;
 mod boxdraw;
 mod config;
 mod ctl;
@@ -9,9 +13,9 @@ mod input;
 mod render;
 mod session;
 mod snapshot;
-mod theme;
 #[cfg(test)]
 mod tests;
+mod theme;
 
 use std::sync::{mpsc, Arc};
 use std::time::Duration;
@@ -31,8 +35,9 @@ shortcuts:
   Ctrl+Shift+T new tab        Ctrl+Shift+1..9 open profile N     Ctrl+Shift+W close tab
   Ctrl+Tab / Alt+1..9 switch  Ctrl+Shift+C / V copy / paste       Ctrl+Shift+P next theme
   Ctrl+Shift+= / - / 0 font   Shift+PageUp/PageDown scrollback
+  (macOS: Cmd instead of Ctrl+Shift, e.g. Cmd+T, Cmd+W, Cmd+C)
 
-config: ~/.config/agentty/config.toml";
+config: ~/.config/agentty/config.toml (Windows: %APPDATA%\\agentty\\config.toml)";
 
 fn arg_value(args: &[String], name: &str) -> Option<String> {
     args.iter().position(|a| a == name).and_then(|i| args.get(i + 1).cloned())
@@ -90,7 +95,11 @@ fn main() {
                 max_ms: arg_value(opts, "--max-ms").and_then(|v| v.parse().ok()).unwrap_or(15_000),
                 title: arg_value(opts, "--title"),
                 tabs,
-                command: if cmd.is_empty() { vec![std::env::var("SHELL").unwrap_or("/bin/sh".into())] } else { cmd.to_vec() },
+                command: if cmd.is_empty() {
+                    vec![std::env::var("SHELL").unwrap_or("/bin/sh".into())]
+                } else {
+                    cmd.to_vec()
+                },
             };
             if let Err(e) = snapshot::run(&cfg, o) {
                 eprintln!("agentty: {e}");

@@ -48,7 +48,14 @@ pub struct Theme {
 
 macro_rules! theme {
     ($name:expr, $bg:expr, $fg:expr, $cursor:expr, $sel:expr, $ansi:expr) => {
-        Theme { name: $name, bg: Rgb::hex($bg), fg: Rgb::hex($fg), cursor: Rgb::hex($cursor), selection: Rgb::hex($sel), ansi: $ansi }
+        Theme {
+            name: $name,
+            bg: Rgb::hex($bg),
+            fg: Rgb::hex($fg),
+            cursor: Rgb::hex($cursor),
+            selection: Rgb::hex($sel),
+            ansi: $ansi,
+        }
     };
 }
 

@@ -71,6 +71,7 @@ fn config_rejects_unknown_keys_and_has_sane_defaults() {
     assert_eq!(custom.profiles[0].command, vec!["claude"]);
 }
 
+#[cfg(unix)] // uses printf
 #[test]
 fn snapshot_renders_a_real_command() {
     let cfg = crate::config::Config::default();

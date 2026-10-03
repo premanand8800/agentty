@@ -9,15 +9,19 @@
 
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::io::{BufRead, BufReader, Write};
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
-use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+#[cfg(unix)]
+use std::{
+    io::{BufRead, BufReader, Write},
+    os::unix::fs::{MetadataExt, PermissionsExt},
+    os::unix::net::{UnixListener, UnixStream},
+    time::{Duration, Instant},
+};
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
+#[cfg_attr(not(unix), allow(dead_code))] // the socket server is Unix-only for now
 pub enum Request {
     List,
     Open {
@@ -64,6 +68,7 @@ pub enum Request {
 
 #[derive(Debug, Clone, Copy, Deserialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(not(unix), allow(dead_code))]
 pub enum WaitFor {
     /// Output stopped and nothing is asked of you.
     Idle,
@@ -83,6 +88,7 @@ fn default_lines() -> usize {
     200
 }
 
+#[cfg(unix)]
 fn runtime_dir() -> PathBuf {
     match std::env::var_os("XDG_RUNTIME_DIR") {
         Some(d) => PathBuf::from(d).join("agentty"),
@@ -93,6 +99,7 @@ fn runtime_dir() -> PathBuf {
     }
 }
 
+#[cfg(unix)]
 /// Where `agentty ctl` connects. Inside a tab, `AGENTTY_SOCKET` names that tab's own window;
 /// elsewhere `ctl.sock` points at the most recently opened window.
 pub fn socket_path() -> PathBuf {
@@ -102,10 +109,12 @@ pub fn socket_path() -> PathBuf {
     }
 }
 
+#[cfg(unix)]
 fn is_live(path: &Path) -> bool {
     UnixStream::connect(path).is_ok()
 }
 
+#[cfg(unix)]
 /// Point `ctl.sock` at `target` atomically (symlink + rename), so clients never see it missing.
 fn point_default_at(dir: &Path, target: &Path) -> std::io::Result<()> {
     let tmp = dir.join(format!(".ctl-{}.tmp", std::process::id()));
@@ -114,6 +123,7 @@ fn point_default_at(dir: &Path, target: &Path) -> std::io::Result<()> {
     std::fs::rename(&tmp, dir.join("ctl.sock"))
 }
 
+#[cfg(unix)]
 /// Remove this window's socket. If `ctl.sock` pointed here, repoint it at another live window.
 pub fn cleanup(path: &Path) {
     let _ = std::fs::remove_file(path);
@@ -127,7 +137,9 @@ pub fn cleanup(path: &Path) {
         .flatten()
         .flatten()
         .map(|e| e.path())
-        .filter(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("ctl-") && n.ends_with(".sock")))
+        .filter(|p| {
+            p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("ctl-") && n.ends_with(".sock"))
+        })
         .find(|p| is_live(p));
     match other {
         Some(p) => {
@@ -142,6 +154,7 @@ pub fn cleanup(path: &Path) {
 /// Runs one request on the UI thread and returns its JSON reply.
 pub type Dispatch = Arc<dyn Fn(Request) -> Value + Send + Sync>;
 
+#[cfg(unix)]
 /// Start the server. Returns the socket path, or an error if another instance owns it.
 pub fn serve(dispatch: Dispatch) -> Result<PathBuf, String> {
     // One socket per window, so tabs always control their own window, plus `ctl.sock` pointing
@@ -166,13 +179,15 @@ pub fn serve(dispatch: Dispatch) -> Result<PathBuf, String> {
         .spawn(move || {
             for stream in listener.incoming().flatten() {
                 let dispatch = dispatch.clone();
-                let _ = std::thread::Builder::new().name("agentty-ctl-conn".into()).spawn(move || handle(stream, dispatch));
+                let _ =
+                    std::thread::Builder::new().name("agentty-ctl-conn".into()).spawn(move || handle(stream, dispatch));
             }
         })
         .map_err(|e| e.to_string())?;
     Ok(path)
 }
 
+#[cfg(unix)]
 fn handle(stream: UnixStream, dispatch: Dispatch) {
     let Ok(mut writer) = stream.try_clone() else { return };
     let reader = BufReader::new(stream);
@@ -192,6 +207,7 @@ fn handle(stream: UnixStream, dispatch: Dispatch) {
     }
 }
 
+#[cfg(unix)]
 /// Poll the tab's status until the condition holds. Runs on the connection thread, not the UI.
 fn wait(dispatch: &Dispatch, id: u32, until: WaitFor, timeout_ms: Option<u64>) -> Value {
     let start = Instant::now();
@@ -223,6 +239,7 @@ fn wait(dispatch: &Dispatch, id: u32, until: WaitFor, timeout_ms: Option<u64>) -
     }
 }
 
+#[cfg(unix)]
 /// `agentty ctl ...`: build a request from CLI arguments, send it, print the reply.
 pub fn client(args: &[String]) -> i32 {
     let usage = "usage: agentty ctl list | open <profile> | open -- <cmd...> [--cwd DIR] | send <id> <text...> [--no-enter] [--paste]\n\
@@ -258,7 +275,29 @@ pub fn client(args: &[String]) -> i32 {
     } else {
         println!("{}", serde_json::to_string_pretty(&reply).unwrap_or_default());
     }
-    if reply["ok"] == json!(true) { 0 } else { 1 }
+    if reply["ok"] == json!(true) {
+        0
+    } else {
+        1
+    }
+}
+
+#[cfg(not(unix))]
+const NO_CTL: &str = "the control API is not available on Windows yet";
+
+#[cfg(not(unix))]
+pub fn serve(_dispatch: Dispatch) -> Result<PathBuf, String> {
+    Err(NO_CTL.into())
+}
+
+#[cfg(not(unix))]
+pub fn cleanup(_path: &Path) {}
+
+#[cfg(not(unix))]
+pub fn client(args: &[String]) -> i32 {
+    let _ = build(args);
+    eprintln!("agentty: {NO_CTL}");
+    1
 }
 
 fn flag(args: &[String], name: &str) -> Option<String> {

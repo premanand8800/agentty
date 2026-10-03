@@ -1,6 +1,10 @@
 # agentty
 
-**A lightweight terminal built for running and supervising AI coding agents.** Looks like macOS Terminal, runs on Linux, uses about 16 MB of memory.
+**A lightweight terminal built for running and supervising AI coding agents.** Looks like macOS Terminal, runs on Linux, macOS and Windows, and uses about 16 MB of memory.
+
+[![CI](https://github.com/premanand8800/agentty/actions/workflows/ci.yml/badge.svg)](https://github.com/premanand8800/agentty/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/premanand8800/agentty)](https://github.com/premanand8800/agentty/releases/latest)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 ![agentty running three agents: Claude needs you (orange), Codex working (green), a shell idle (gray)](docs/agent-tabs.png)
 
@@ -9,6 +13,7 @@ When you run Claude Code, Codex or Antigravity for hours, often several at once,
 ## What makes it an agent terminal
 
 - **Knows which agent needs you.** Every tab has a status dot: 🟢 working, 🟠 **needs you**, ⚪ idle, 🔴 exited with an error. "Needs you" fires on the terminal bell, or when output stops and the screen shows a waiting prompt ("Do you want to…", "(y/n)", "❯ 1. Yes", …). Background tabs send a desktop notification.
+- **Dock badge.** The app icon shows how many tabs are open and highlights when an agent needs you (Ubuntu Dock, Dash to Dock, KDE).
 - **Agent control API.** Other agents and scripts can open tabs, type into them, read the screen as plain text and wait until an agent is done or needs input. Every tab gets `AGENTTY_SOCKET` and `AGENTTY_TAB_ID`, so an agent inside agentty can supervise its siblings.
 - **One key per agent.** `Ctrl+Shift+1..9` opens your shell, Claude, Codex, Antigravity, Gemini, Aider or Goose, whichever are installed.
 - **Built for long sessions.** Scrollback is capped per tab, nothing is retained beyond it, and it uses 0% CPU while agents are idle.
@@ -22,7 +27,7 @@ When you run Claude Code, Codex or Antigravity for hours, often several at once,
 | 1 tab after 300,000 lines of output | 28 MB |
 | 4 tabs with full scrollback | 65 MB |
 | CPU while agents are idle | **0.0%** |
-| Binary | 4.4 MB, no runtime dependencies |
+| Binary | 5.5 MB, no runtime dependencies (2.3 MB download) |
 
 It stays this small because it renders on the CPU (no GPU context, which alone costs 50–150 MB) and only when something changes. Fonts are parsed lazily: a large CJK fallback font isn't loaded until CJK text appears.
 
@@ -34,13 +39,39 @@ The nine macOS Terminal profiles plus *Midnight*. Cycle with `Ctrl+Shift+P`, or 
 
 ## Install
 
+**Linux and macOS:**
+
 ```bash
-git clone https://github.com/premanand8800/agentty && cd agentty
-./scripts/install.sh        # builds, installs to ~/.local/bin and adds an app-menu entry
-agentty
+curl -fsSL https://raw.githubusercontent.com/premanand8800/agentty/main/scripts/get.sh | sh
 ```
 
-Needs Rust 1.85+ (`rustup`). Linux (X11 or Wayland) is tested. macOS and the BSDs should build but are untested.
+On Linux this installs `~/.local/bin/agentty` and an app-menu entry. On macOS it installs `~/Applications/agentty.app` (Launchpad, Spotlight) and the `agentty` command.
+
+**Windows:** download `agentty-windows-x86_64.zip` from the [latest release](https://github.com/premanand8800/agentty/releases/latest), unzip it, and run `agentty.exe`. Windows SmartScreen may warn because the app isn't signed yet: choose **More info → Run anyway**.
+
+**Manual downloads** (with SHA256 checksums) are on the [releases page](https://github.com/premanand8800/agentty/releases/latest): Linux x86_64 and ARM64, macOS universal (Apple Silicon and Intel), Windows x86_64.
+
+**From source** (Rust 1.89+):
+
+```bash
+git clone https://github.com/premanand8800/agentty && cd agentty
+./scripts/install.sh        # Linux: builds, installs, adds an app-menu entry
+cargo build --release       # any OS: target/release/agentty
+```
+
+### Platform support
+
+| | Linux | macOS | Windows |
+|---|---|---|---|
+| Terminal, tabs, themes, agent status | ✅ | ✅ | ✅ |
+| Look | macOS-style title bar drawn by agentty | native title bar and traffic lights | macOS-style title bar drawn by agentty |
+| Shortcuts | `Ctrl+Shift+…` | `⌘…` | `Ctrl+Shift+…` |
+| Desktop notifications | ✅ `notify-send` | ✅ | not yet |
+| Dock badge (tab count, urgent) | ✅ | not yet | not yet |
+| Agent control API (`agentty ctl`) | ✅ | ✅ | not yet |
+| Memory shown in status bar | ✅ | – | – |
+
+Linux is where agentty is developed and tested day to day. The macOS and Windows builds compile and lint cleanly in CI, but have had less real-world use, so please [report issues](https://github.com/premanand8800/agentty/issues).
 
 ## Shortcuts
 
@@ -55,6 +86,8 @@ Needs Rust 1.85+ (`rustup`). Linux (X11 or Wayland) is tested. macOS and the BSD
 | `Ctrl+Shift+=` / `-` / `0` | Bigger / smaller / reset font |
 | `Shift+PageUp/PageDown/Home/End` | Scrollback |
 | Mouse | Drag to select, wheel to scroll, middle-click to paste, middle-click a tab to close it |
+
+On macOS use `⌘` instead of `Ctrl+Shift` (`⌘T`, `⌘W`, `⌘C`, `⌘V`, `⌘P`, `⌘1`…).
 
 ## Agent control API
 
@@ -82,7 +115,7 @@ The protocol is one JSON object per line, so any language can use it:
 
 ## Configuration
 
-`~/.config/agentty/config.toml`. Every key is optional; unknown keys are an error.
+`~/.config/agentty/config.toml` (Windows: `%APPDATA%\agentty\config.toml`). Every key is optional; unknown keys are an error.
 
 ```toml
 theme = "Pro"
@@ -117,7 +150,8 @@ Without `[[profiles]]`, agentty uses your shell plus every agent CLI it finds on
 - No split panes yet (tabs only), no ligatures, no IME input, no image protocols (sixel/kitty).
 - Mouse reporting to programs isn't implemented; the wheel scrolls, and in full-screen apps it sends arrow keys.
 - "Needs you" detection is a heuristic. The bell is reliable; prompt phrases can be tuned with `attention_phrases`.
-- The window draws its own macOS-style title bar. Window-manager snapping depends on your desktop.
+- On Linux and Windows the window draws its own macOS-style title bar. Window-manager snapping depends on your desktop.
+- The macOS app is ad-hoc signed but not notarized, and the Windows exe isn't signed yet.
 
 ## License
 

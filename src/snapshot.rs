@@ -27,7 +27,12 @@ pub struct Options {
 }
 
 pub fn run(cfg: &Config, o: Options) -> Result<(), String> {
-    let theme_idx = o.theme.as_deref().map(|n| theme::by_name(n).ok_or(format!("unknown theme '{n}'"))).transpose()?.unwrap_or_else(|| theme::by_name(&cfg.theme).unwrap_or(0));
+    let theme_idx = o
+        .theme
+        .as_deref()
+        .map(|n| theme::by_name(n).ok_or(format!("unknown theme '{n}'")))
+        .transpose()?
+        .unwrap_or_else(|| theme::by_name(&cfg.theme).unwrap_or(0));
     let theme = &THEMES[theme_idx];
     let mut fonts = Fonts::new(cfg.font.as_deref(), cfg.font_size * 1.25 * o.scale, 13.0 * o.scale)?;
     let show_tabs = !o.tabs.is_empty();

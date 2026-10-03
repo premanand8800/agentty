@@ -61,26 +61,64 @@ pub struct App {
     ctl_socket: Option<PathBuf>,
     startup_profile: Option<String>,
     os_title: String,
+    badge: crate::badge::Badge,
 }
 
+/// Resident memory in MB, shown in the status bar. Linux only for now (0 = unknown).
 fn rss_mb() -> f32 {
-    std::fs::read_to_string("/proc/self/statm")
-        .ok()
-        .and_then(|s| s.split_whitespace().nth(1)?.parse::<f32>().ok())
-        .map(|pages| pages * 4096.0 / 1_048_576.0)
-        .unwrap_or(0.0)
+    #[cfg(target_os = "linux")]
+    {
+        std::fs::read_to_string("/proc/self/statm")
+            .ok()
+            .and_then(|s| s.split_whitespace().nth(1)?.parse::<f32>().ok())
+            .map(|pages| pages * 4096.0 / 1_048_576.0)
+            .unwrap_or(0.0)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        0.0
+    }
 }
 
+/// Desktop notification through the platform's own tool. Best effort: no tool, no notification.
 fn notify(title: &str, body: &str) {
-    let _ = std::process::Command::new("notify-send")
-        .args(["-a", "agentty", "-u", "normal", title, body])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn();
+    let mut cmd = if cfg!(target_os = "macos") {
+        let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
+        let mut c = std::process::Command::new("osascript");
+        c.args(["-e", &format!("display notification \"{}\" with title \"{}\"", esc(body), esc(title))]);
+        c
+    } else if cfg!(windows) {
+        return;
+    } else {
+        let mut c = std::process::Command::new("notify-send");
+        c.args(["-a", "agentty", "-u", "normal", title, body]);
+        c
+    };
+    let _ = cmd.stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn();
 }
+
+/// macOS uses Cmd for app shortcuts (Cmd+T, Cmd+W, ...); elsewhere Ctrl+Shift, so plain Ctrl keys
+/// still reach the program.
+fn app_modifier(m: ModifiersState) -> bool {
+    if cfg!(target_os = "macos") {
+        m.super_key() && !m.control_key() && !m.alt_key()
+    } else {
+        m.control_key() && m.shift_key() && !m.alt_key()
+    }
+}
+
+const HINTS: &str =
+    if cfg!(target_os = "macos") { "⌘P theme · ⌘T tab" } else { "Ctrl+Shift+P theme · Ctrl+Shift+T tab" };
+/// macOS draws its own title-bar buttons; elsewhere agentty draws macOS-style ones.
+const NATIVE_TITLEBAR: bool = cfg!(target_os = "macos");
 
 impl App {
-    pub fn new(cfg: Config, proxy: EventLoopProxy<UserEvent>, ctl_socket: Option<PathBuf>, startup_profile: Option<String>) -> Result<App, String> {
+    pub fn new(
+        cfg: Config,
+        proxy: EventLoopProxy<UserEvent>,
+        ctl_socket: Option<PathBuf>,
+        startup_profile: Option<String>,
+    ) -> Result<App, String> {
         let theme = theme::by_name(&cfg.theme).unwrap_or(0);
         let font_pt = cfg.font_size;
         let fonts = Fonts::new(cfg.font.as_deref(), font_pt * PX_PER_PT, UI_PX)?;
@@ -109,12 +147,15 @@ impl App {
             ctl_socket,
             startup_profile,
             os_title: String::new(),
+            badge: crate::badge::Badge::new(),
         })
     }
 
     fn layout(&self) -> Layout {
         let size = self.window.as_ref().map(|w| w.inner_size()).unwrap_or_default();
-        Layout::new(size.width as usize, size.height as usize, self.scale, self.sessions.len() > 1)
+        let mut l = Layout::new(size.width as usize, size.height as usize, self.scale, self.sessions.len() > 1);
+        l.native_titlebar = NATIVE_TITLEBAR;
+        l
     }
 
     fn redraw(&self) {
@@ -306,6 +347,10 @@ impl App {
             }
         }
         self.last_status = self.sessions.iter().map(|s| s.status(now)).collect();
+        self.badge.set(crate::badge::State {
+            tabs: self.sessions.len(),
+            urgent: self.last_status.contains(&Status::NeedsYou),
+        });
         if changed || self.last_status.contains(&Status::NeedsYou) {
             self.redraw();
         }
@@ -323,7 +368,8 @@ impl App {
         }
         let layout = self.layout();
         let now = Instant::now();
-        let tabs: Vec<TabInfo> = self.sessions.iter().map(|s| TabInfo { title: s.title.clone(), status: s.status(now) }).collect();
+        let tabs: Vec<TabInfo> =
+            self.sessions.iter().map(|s| TabInfo { title: s.title.clone(), status: s.status(now) }).collect();
         let theme = &THEMES[self.theme];
         let pulse = ((self.started.elapsed().as_secs_f32() * 3.0).sin() + 1.0) / 2.0;
         let (window_title, status_left, status_right) = match self.sessions.get(self.active) {
@@ -331,6 +377,7 @@ impl App {
                 let st = s.status(now);
                 let hint = match st {
                     Status::NeedsYou => " · waiting for your input",
+                    Status::Exited(_) if cfg!(target_os = "macos") => " · ⌘W to close",
                     Status::Exited(_) => " · Ctrl+Shift+W to close",
                     _ => "",
                 };
@@ -341,7 +388,11 @@ impl App {
                 (
                     format!("{} — {}×{}", s.title, s.dims.cols, s.dims.rows),
                     format!("{} · {}{}", s.profile, st_label, hint),
-                    format!("{} · {:.0} MB · Ctrl+Shift+P theme · Ctrl+Shift+T tab", theme.name, self.mem_mb),
+                    if self.mem_mb > 0.0 {
+                        format!("{} · {:.0} MB · {HINTS}", theme.name, self.mem_mb)
+                    } else {
+                        format!("{} · {HINTS}", theme.name)
+                    },
                 )
             }
             None => ("agentty".into(), String::new(), String::new()),
@@ -384,7 +435,7 @@ impl App {
         let l = self.layout();
         let (x, y) = (self.cursor.x as f32, self.cursor.y as f32);
         if y < l.title_h as f32 {
-            if x < 72.0 * self.scale {
+            if x < 72.0 * self.scale && !l.native_titlebar {
                 return Hover::Lights;
             }
             let (bx, by, bs) = l.new_tab_button();
@@ -405,6 +456,9 @@ impl App {
 
     fn resize_edge(&self) -> Option<ResizeDirection> {
         let l = self.layout();
+        if l.native_titlebar {
+            return None; // the OS frame handles resizing
+        }
         let e = 5.0 * self.scale as f64;
         let (x, y, w, h) = (self.cursor.x, self.cursor.y, l.w as f64, l.h as f64);
         let (left, right, top, bottom) = (x < e, x > w - e, y < e, y > h - e);
@@ -494,7 +548,9 @@ impl App {
                 Some(ResizeDirection::North | ResizeDirection::South) => CursorIcon::NsResize,
                 Some(ResizeDirection::NorthEast | ResizeDirection::SouthWest) => CursorIcon::NeswResize,
                 Some(ResizeDirection::NorthWest | ResizeDirection::SouthEast) => CursorIcon::NwseResize,
-                None if self.hover != Hover::None || self.cursor.y < self.layout().title_h as f64 => CursorIcon::Default,
+                None if self.hover != Hover::None || self.cursor.y < self.layout().title_h as f64 => {
+                    CursorIcon::Default
+                }
                 None => CursorIcon::Text,
             };
             w.set_cursor(icon);
@@ -521,7 +577,15 @@ impl App {
         let mode = *s.term.lock().mode();
         if mode.contains(TermMode::ALT_SCREEN) && mode.contains(TermMode::ALTERNATE_SCROLL) {
             let key: &[u8] = if lines > 0 { b"\x1b[A" } else { b"\x1b[B" };
-            let key = if mode.contains(TermMode::APP_CURSOR) { if lines > 0 { b"\x1bOA" as &[u8] } else { b"\x1bOB" } } else { key };
+            let key = if mode.contains(TermMode::APP_CURSOR) {
+                if lines > 0 {
+                    b"\x1bOA" as &[u8]
+                } else {
+                    b"\x1bOB"
+                }
+            } else {
+                key
+            };
             s.write(key.repeat(lines.unsigned_abs() as usize));
         } else {
             s.scroll(Scroll::Delta(lines));
@@ -568,8 +632,7 @@ impl App {
     /// App shortcuts. Returns true if the key was handled here and must not reach the program.
     fn shortcut(&mut self, code: KeyCode, el: &ActiveEventLoop) -> bool {
         let m = self.mods;
-        let ctrl_shift = m.control_key() && m.shift_key() && !m.alt_key();
-        if ctrl_shift {
+        if app_modifier(m) {
             match code {
                 KeyCode::KeyT => self.open_profile_index(0),
                 KeyCode::KeyW => self.close(self.active, el),
@@ -583,8 +646,15 @@ impl App {
                 KeyCode::Minus => self.change_font(-1.0),
                 KeyCode::Digit0 => self.change_font(0.0),
                 KeyCode::Tab => self.cycle_tab(false),
-                KeyCode::Digit1 | KeyCode::Digit2 | KeyCode::Digit3 | KeyCode::Digit4 | KeyCode::Digit5 | KeyCode::Digit6
-                | KeyCode::Digit7 | KeyCode::Digit8 | KeyCode::Digit9 => {
+                KeyCode::Digit1
+                | KeyCode::Digit2
+                | KeyCode::Digit3
+                | KeyCode::Digit4
+                | KeyCode::Digit5
+                | KeyCode::Digit6
+                | KeyCode::Digit7
+                | KeyCode::Digit8
+                | KeyCode::Digit9 => {
                     let n = code as usize - KeyCode::Digit1 as usize;
                     self.open_profile_index(n);
                 }
@@ -604,8 +674,15 @@ impl App {
         }
         if m.alt_key() && !m.control_key() && !m.shift_key() {
             let digits = [
-                KeyCode::Digit1, KeyCode::Digit2, KeyCode::Digit3, KeyCode::Digit4, KeyCode::Digit5,
-                KeyCode::Digit6, KeyCode::Digit7, KeyCode::Digit8, KeyCode::Digit9,
+                KeyCode::Digit1,
+                KeyCode::Digit2,
+                KeyCode::Digit3,
+                KeyCode::Digit4,
+                KeyCode::Digit5,
+                KeyCode::Digit6,
+                KeyCode::Digit7,
+                KeyCode::Digit8,
+                KeyCode::Digit9,
             ];
             if let Some(n) = digits.iter().position(|d| *d == code) {
                 self.activate(n);
@@ -643,7 +720,9 @@ impl App {
     fn on_ctl(&mut self, req: Request, el: &ActiveEventLoop) -> Value {
         let missing = |id: u32| json!({"ok": false, "error": format!("no tab with id {id}")});
         match req {
-            Request::List => json!({"ok": true, "tabs": (0..self.sessions.len()).map(|i| self.tab_json(i)).collect::<Vec<_>>()}),
+            Request::List => {
+                json!({"ok": true, "tabs": (0..self.sessions.len()).map(|i| self.tab_json(i)).collect::<Vec<_>>()})
+            }
             Request::Open { profile, command, cwd, title, focus } => {
                 let mut p = match (profile, command) {
                     (_, Some(cmd)) if !cmd.is_empty() => Profile { name: cmd[0].clone(), command: cmd, cwd: None },
@@ -683,7 +762,9 @@ impl App {
                 json!({"ok": true, "text": text, "tab": self.tab_json(i)})
             }
             Request::Status { id } => match self.index_of(id) {
-                Some(i) => json!({"ok": true, "status": self.sessions[i].status(Instant::now()).label(), "tab": self.tab_json(i)}),
+                Some(i) => {
+                    json!({"ok": true, "status": self.sessions[i].status(Instant::now()).label(), "tab": self.tab_json(i)})
+                }
                 None => missing(id),
             },
             Request::Focus { id } => match self.index_of(id) {
@@ -706,7 +787,9 @@ impl App {
                     self.redraw();
                     json!({"ok": true, "theme": THEMES[t].name})
                 }
-                None => json!({"ok": false, "error": "unknown theme", "themes": THEMES.iter().map(|t| t.name).collect::<Vec<_>>()}),
+                None => {
+                    json!({"ok": false, "error": "unknown theme", "themes": THEMES.iter().map(|t| t.name).collect::<Vec<_>>()})
+                }
             },
             Request::Wait { .. } => json!({"ok": false, "error": "wait is handled by the socket thread"}),
         }
@@ -722,7 +805,14 @@ impl ApplicationHandler<UserEvent> for App {
             .with_title("agentty")
             .with_inner_size(LogicalSize::new(980.0, 640.0))
             .with_min_inner_size(LogicalSize::new(420.0, 240.0))
-            .with_decorations(false);
+            .with_decorations(NATIVE_TITLEBAR);
+        // macOS: keep the real window frame and traffic lights, with content drawn under a
+        // transparent title bar, exactly like Terminal.app.
+        #[cfg(target_os = "macos")]
+        let attrs = {
+            use winit::platform::macos::WindowAttributesExtMacOS;
+            attrs.with_titlebar_transparent(true).with_title_hidden(true).with_fullsize_content_view(true)
+        };
         // App ID (Wayland) / WM_CLASS (X11) must match agentty.desktop, or the dock shows the
         // window as an unknown app with a generic icon instead of under the pinned agentty icon.
         #[cfg(all(unix, not(target_os = "macos")))]
@@ -854,7 +944,8 @@ impl ApplicationHandler<UserEvent> for App {
         // attention check, or pulsing. Otherwise sleep until an event arrives (0% CPU when idle).
         let busy = self.sessions.iter().any(|s| {
             matches!(s.status(now), Status::Working | Status::NeedsYou)
-                || (!s.attention_checked && s.last_output.is_some_and(|t| now.duration_since(t) < session::ATTENTION_QUIET * 2))
+                || (!s.attention_checked
+                    && s.last_output.is_some_and(|t| now.duration_since(t) < session::ATTENTION_QUIET * 2))
         });
         if busy {
             el.set_control_flow(ControlFlow::WaitUntil(now + Duration::from_millis(250)));

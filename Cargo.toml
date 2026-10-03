@@ -4,7 +4,10 @@ version = "0.1.0"
 edition = "2021"
 description = "A lightweight terminal built for running and supervising AI coding agents"
 license = "MIT"
-rust-version = "1.85"
+rust-version = "1.89"
+repository = "https://github.com/premanand8800/agentty"
+keywords = ["terminal", "ai", "agents", "claude", "codex"]
+categories = ["command-line-utilities"]
 
 [dependencies]
 ab_glyph = "0.2"
@@ -22,3 +25,7 @@ opt-level = 3
 lto = "thin"
 codegen-units = 1
 strip = true
+
+# Dock badge (Unity LauncherEntry API, read by Ubuntu Dock / Dash to Dock / KDE). Linux and BSDs only.
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+zbus = "5"
