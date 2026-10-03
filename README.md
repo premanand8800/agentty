@@ -161,7 +161,7 @@ Theme, font, font size and background changed with shortcuts are saved in `ui.to
 - **Engineering:** the terminal core is [`alacritty_terminal`](https://crates.io/crates/alacritty_terminal), the battle-tested core of Alacritty (VT parsing, grid, PTY). agentty adds the window, the CPU renderer (`softbuffer` + `ab_glyph`), tabs, agent status and the control API. About 4,000 lines of Rust, tests included.
 - **Systems:** one I/O thread per tab and one UI thread. Control requests run on their own threads and reach the UI through the event loop, so a slow client never blocks drawing. The window sleeps until there is input, output or a status change.
 
-## Limitations (v0.1)
+## Limitations
 
 - No GPU rendering. Fine for terminals, but full-screen redraws on 4K monitors cost more CPU than a GPU terminal.
 - No split panes yet (tabs only), no ligatures, no IME input, no image protocols (sixel/kitty).
