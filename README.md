@@ -58,7 +58,7 @@ Needs Rust 1.85+ (`rustup`). Linux (X11 or Wayland) is tested. macOS and the BSD
 
 ## Agent control API
 
-A Unix socket at `$XDG_RUNTIME_DIR/agentty/ctl.sock`. Only your user can open it (mode `0600` in a `0700` directory). Nothing listens on the network.
+Each window listens on its own Unix socket, `$XDG_RUNTIME_DIR/agentty/ctl-<pid>.sock`, and `ctl.sock` points at the most recently opened window. Inside a tab, `AGENTTY_SOCKET` names that tab's own window, so `agentty ctl` always controls the window it runs in. Only your user can open the sockets (mode `0600` in a `0700` directory). Nothing listens on the network.
 
 ```bash
 agentty ctl list

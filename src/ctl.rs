@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -83,18 +83,60 @@ fn default_lines() -> usize {
     200
 }
 
-pub fn socket_path() -> PathBuf {
-    if let Some(p) = std::env::var_os("AGENTTY_SOCKET") {
-        return PathBuf::from(p);
-    }
-    let base = match std::env::var_os("XDG_RUNTIME_DIR") {
+fn runtime_dir() -> PathBuf {
+    match std::env::var_os("XDG_RUNTIME_DIR") {
         Some(d) => PathBuf::from(d).join("agentty"),
         None => {
             let uid = std::fs::metadata("/proc/self").map(|m| m.uid()).unwrap_or(0);
             std::env::temp_dir().join(format!("agentty-{uid}"))
         }
-    };
-    base.join("ctl.sock")
+    }
+}
+
+/// Where `agentty ctl` connects. Inside a tab, `AGENTTY_SOCKET` names that tab's own window;
+/// elsewhere `ctl.sock` points at the most recently opened window.
+pub fn socket_path() -> PathBuf {
+    match std::env::var_os("AGENTTY_SOCKET") {
+        Some(p) if !p.is_empty() => PathBuf::from(p),
+        _ => runtime_dir().join("ctl.sock"),
+    }
+}
+
+fn is_live(path: &Path) -> bool {
+    UnixStream::connect(path).is_ok()
+}
+
+/// Point `ctl.sock` at `target` atomically (symlink + rename), so clients never see it missing.
+fn point_default_at(dir: &Path, target: &Path) -> std::io::Result<()> {
+    let tmp = dir.join(format!(".ctl-{}.tmp", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    std::os::unix::fs::symlink(target, &tmp)?;
+    std::fs::rename(&tmp, dir.join("ctl.sock"))
+}
+
+/// Remove this window's socket. If `ctl.sock` pointed here, repoint it at another live window.
+pub fn cleanup(path: &Path) {
+    let _ = std::fs::remove_file(path);
+    let Some(dir) = path.parent() else { return };
+    let link = dir.join("ctl.sock");
+    if std::fs::read_link(&link).ok().as_deref() != Some(path) {
+        return;
+    }
+    let other = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("ctl-") && n.ends_with(".sock")))
+        .find(|p| is_live(p));
+    match other {
+        Some(p) => {
+            let _ = point_default_at(dir, &p);
+        }
+        None => {
+            let _ = std::fs::remove_file(&link);
+        }
+    }
 }
 
 /// Runs one request on the UI thread and returns its JSON reply.
@@ -102,19 +144,23 @@ pub type Dispatch = Arc<dyn Fn(Request) -> Value + Send + Sync>;
 
 /// Start the server. Returns the socket path, or an error if another instance owns it.
 pub fn serve(dispatch: Dispatch) -> Result<PathBuf, String> {
-    let path = socket_path();
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-        let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
-    }
-    if path.exists() {
-        if UnixStream::connect(&path).is_ok() {
-            return Err(format!("another agentty already serves {}", path.display()));
+    // One socket per window, so tabs always control their own window, plus `ctl.sock` pointing
+    // at the newest window for callers outside agentty.
+    let dir = runtime_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+    for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+        let p = entry.path();
+        let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if name.starts_with("ctl-") && name.ends_with(".sock") && !is_live(&p) {
+            let _ = std::fs::remove_file(&p); // left behind by a crashed window
         }
-        let _ = std::fs::remove_file(&path); // stale socket from a crashed run
     }
+    let path = dir.join(format!("ctl-{}.sock", std::process::id()));
+    let _ = std::fs::remove_file(&path);
     let listener = UnixListener::bind(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).map_err(|e| e.to_string())?;
+    point_default_at(&dir, &path).map_err(|e| format!("{}: {e}", dir.join("ctl.sock").display()))?;
     std::thread::Builder::new()
         .name("agentty-ctl".into())
         .spawn(move || {

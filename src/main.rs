@@ -132,7 +132,7 @@ fn run_window(cfg: config::Config, profile: Option<String>) -> Result<(), String
     let mut app = app::App::new(cfg, proxy, socket.clone(), profile)?;
     let result = event_loop.run_app(&mut app).map_err(|e| e.to_string());
     if let Some(p) = socket {
-        let _ = std::fs::remove_file(p);
+        ctl::cleanup(&p);
     }
     result
 }
