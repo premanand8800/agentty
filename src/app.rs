@@ -62,6 +62,7 @@ pub struct App {
     startup_profile: Option<String>,
     os_title: String,
     badge: crate::badge::Badge,
+    scroll_accum: f64,
 }
 
 /// Resident memory in MB, shown in the status bar. Linux only for now (0 = unknown).
@@ -148,6 +149,7 @@ impl App {
             startup_profile,
             os_title: String::new(),
             badge: crate::badge::Badge::new(),
+            scroll_accum: 0.0,
         })
     }
 
@@ -381,6 +383,12 @@ impl App {
                     Status::Exited(_) => " · Ctrl+Shift+W to close",
                     _ => "",
                 };
+                let scrolled = s.term.lock().grid().display_offset();
+                let hint = if scrolled > 0 {
+                    if cfg!(target_os = "macos") { " · ↑ scrolled back · type to return" } else { " · ↑ scrolled back · Shift+End to return" }
+                } else {
+                    hint
+                };
                 let st_label = match st {
                     Status::Exited(c) => format!("exited ({c})"),
                     other => other.label().to_string(),
@@ -566,29 +574,30 @@ impl App {
     }
 
     fn on_wheel(&mut self, delta: MouseScrollDelta) {
-        let Some(s) = self.sessions.get(self.active) else { return };
+        let cell_h = self.fonts.cell_h.max(1) as f64;
         let lines = match delta {
-            MouseScrollDelta::LineDelta(_, y) => (y * 3.0).round() as i32,
-            MouseScrollDelta::PixelDelta(p) => (p.y / self.fonts.cell_h as f64).round() as i32,
+            MouseScrollDelta::LineDelta(_, y) => {
+                self.scroll_accum = 0.0;
+                (y * 3.0).round() as i32
+            }
+            // Touchpads send many tiny pixel deltas: add them up until they make whole lines.
+            MouseScrollDelta::PixelDelta(p) => {
+                self.scroll_accum += p.y / cell_h;
+                let whole = self.scroll_accum.trunc();
+                self.scroll_accum -= whole;
+                whole as i32
+            }
         };
         if lines == 0 {
             return;
         }
+        let pointer = self.grid_point();
+        let Some(s) = self.sessions.get(self.active) else { return };
         let mode = *s.term.lock().mode();
-        if mode.contains(TermMode::ALT_SCREEN) && mode.contains(TermMode::ALTERNATE_SCROLL) {
-            let key: &[u8] = if lines > 0 { b"\x1b[A" } else { b"\x1b[B" };
-            let key = if mode.contains(TermMode::APP_CURSOR) {
-                if lines > 0 {
-                    b"\x1bOA" as &[u8]
-                } else {
-                    b"\x1bOB"
-                }
-            } else {
-                key
-            };
-            s.write(key.repeat(lines.unsigned_abs() as usize));
-        } else {
-            s.scroll(Scroll::Delta(lines));
+        let (col, row) = pointer.map(|(p, _)| (p.column.0, p.line.0.max(0) as usize)).unwrap_or((0, 0));
+        match input::wheel(lines, mode, col, row) {
+            input::Wheel::Scrollback(n) => s.scroll(Scroll::Delta(n)),
+            input::Wheel::Bytes(bytes) => s.write(bytes),
         }
         self.redraw();
     }

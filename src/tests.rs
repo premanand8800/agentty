@@ -96,3 +96,19 @@ fn snapshot_renders_a_real_command() {
     let _ = std::fs::remove_file(&out);
     assert_eq!(&bytes[1..4], b"PNG");
 }
+
+#[test]
+fn wheel_goes_to_scrollback_arrows_or_mouse_reports() {
+    use crate::input::{wheel, Wheel};
+    // Normal screen: scrollback.
+    assert_eq!(wheel(3, TermMode::empty(), 0, 0), Wheel::Scrollback(3));
+    // Full-screen program without mouse reporting: arrow keys, even without ALTERNATE_SCROLL.
+    assert_eq!(wheel(2, TermMode::ALT_SCREEN, 0, 0), Wheel::Bytes(b"\x1b[A\x1b[A".to_vec()));
+    assert_eq!(wheel(-1, TermMode::ALT_SCREEN | TermMode::APP_CURSOR, 0, 0), Wheel::Bytes(b"\x1bOB".to_vec()));
+    // Program asked for SGR mouse reporting: wheel-up is button 64 at the pointer cell (1-based).
+    assert_eq!(
+        wheel(1, TermMode::MOUSE_REPORT_CLICK | TermMode::SGR_MOUSE, 4, 9),
+        Wheel::Bytes(b"\x1b[<64;5;10M".to_vec())
+    );
+    assert_eq!(wheel(-1, TermMode::MOUSE_REPORT_CLICK, 0, 0), Wheel::Bytes(vec![0x1b, b'[', b'M', 32 + 65, 33, 33]));
+}

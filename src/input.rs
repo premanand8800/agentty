@@ -111,3 +111,43 @@ pub fn paste(text: &str, mode: TermMode) -> Vec<u8> {
         clean.into_bytes()
     }
 }
+
+/// What a scroll of `lines` (positive = up) should do in the current terminal mode.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Wheel {
+    /// Move the viewport through scrollback.
+    Scrollback(i32),
+    /// Send these bytes to the program instead.
+    Bytes(Vec<u8>),
+}
+
+/// Map a wheel/touchpad scroll to scrollback or program input, like xterm and VTE:
+/// programs that enabled mouse reporting get wheel events, full-screen programs get arrow keys,
+/// everything else scrolls the scrollback. `col`/`row` are the 0-based cell under the pointer.
+pub fn wheel(lines: i32, mode: TermMode, col: usize, row: usize) -> Wheel {
+    let n = lines.unsigned_abs() as usize;
+    if lines == 0 {
+        return Wheel::Scrollback(0);
+    }
+    if mode.intersects(TermMode::MOUSE_MODE) {
+        let button: u32 = if lines > 0 { 64 } else { 65 };
+        let event = if mode.contains(TermMode::SGR_MOUSE) {
+            format!("\x1b[<{button};{};{}M", col + 1, row + 1).into_bytes()
+        } else {
+            // Legacy X10 encoding: values offset by 32, limited to 223.
+            let enc = |v: usize| (32 + v.min(222)) as u8;
+            vec![0x1b, b'[', b'M', (32 + button) as u8, enc(col + 1), enc(row + 1)]
+        };
+        return Wheel::Bytes(event.repeat(n));
+    }
+    if mode.contains(TermMode::ALT_SCREEN) {
+        let key: &[u8] = match (lines > 0, mode.contains(TermMode::APP_CURSOR)) {
+            (true, true) => b"\x1bOA",
+            (true, false) => b"\x1b[A",
+            (false, true) => b"\x1bOB",
+            (false, false) => b"\x1b[B",
+        };
+        return Wheel::Bytes(key.repeat(n));
+    }
+    Wheel::Scrollback(lines)
+}
