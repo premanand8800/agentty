@@ -60,6 +60,7 @@ pub struct App {
     last_status: Vec<Status>,
     ctl_socket: Option<PathBuf>,
     startup_profile: Option<String>,
+    os_title: String,
 }
 
 fn rss_mb() -> f32 {
@@ -107,6 +108,7 @@ impl App {
             last_status: Vec::new(),
             ctl_socket,
             startup_profile,
+            os_title: String::new(),
         })
     }
 
@@ -344,6 +346,11 @@ impl App {
             }
             None => ("agentty".into(), String::new(), String::new()),
         };
+        // Keep the OS-level title in sync: the dock's window list and Alt+Tab show it.
+        if window_title != self.os_title {
+            window.set_title(&window_title);
+            self.os_title = window_title.clone();
+        }
         let chrome = Chrome {
             window_title,
             tabs: &tabs,
@@ -716,6 +723,10 @@ impl ApplicationHandler<UserEvent> for App {
             .with_inner_size(LogicalSize::new(980.0, 640.0))
             .with_min_inner_size(LogicalSize::new(420.0, 240.0))
             .with_decorations(false);
+        // App ID (Wayland) / WM_CLASS (X11) must match agentty.desktop, or the dock shows the
+        // window as an unknown app with a generic icon instead of under the pinned agentty icon.
+        #[cfg(all(unix, not(target_os = "macos")))]
+        let attrs = winit::platform::wayland::WindowAttributesExtWayland::with_name(attrs, "agentty", "agentty");
         let window = match el.create_window(attrs) {
             Ok(w) => Rc::new(w),
             Err(e) => {
